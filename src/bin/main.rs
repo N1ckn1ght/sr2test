@@ -46,21 +46,17 @@ async fn handler(req: Request<Incoming>, addr: SocketAddr, active_ips: Arc<Mutex
             .body(Full::new(Bytes::from("429 too many requests")))
             .unwrap());
     }
-    active_ips.lock().await.insert(addr.ip());
+    active_ips.lock().await.insert(ip);
     let _bouncer = Bouncer::new(ip, Arc::clone(&active_ips));
-    info!("{}\t\tsaved", addr.ip());
+    info!("{}\t\tsaved", &ip);
 
     match time::timeout(WINDOW, router(req)).await {
         Ok(response) => {
             info!("{}\tsucceded", addr);
-            active_ips.lock().await.remove(&addr.ip());
-            info!("{}\t\treleased", addr.ip());
             response
         },
         Err(_) => {
             warn!("{}\ttimed out", addr);
-            active_ips.lock().await.remove(&addr.ip());
-            info!("{}\t\treleased", addr.ip());
             Ok(Response::builder()
                 .status(StatusCode::REQUEST_TIMEOUT)
                 .body(Full::new(Bytes::from("408 timed out")))
