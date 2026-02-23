@@ -13,6 +13,7 @@ use http_body_util::Full;
 
 const WINDOW: Duration = Duration::from_secs(15);
 
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> std::io::Result<()> {
     simple_logger::init_with_level(Level::Info).unwrap();
@@ -37,14 +38,16 @@ async fn main() -> std::io::Result<()> {
 }
 
 async fn handler(req: Request<Incoming>, addr: SocketAddr, active_ips: Arc<Mutex<HashSet<IpAddr>>>) -> Result<Response<Full<Bytes>>, Infallible> {
-    if active_ips.lock().await.contains(&addr.ip()) {
-        info!("{}\t\tdebounced", &addr.ip());
+    let ip = addr.ip();
+    if active_ips.lock().await.contains(&ip) {
+        info!("{}\t\tdebounced", &ip);
         return Ok(Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .body(Full::new(Bytes::from("429 too many requests")))
             .unwrap());
     }
     active_ips.lock().await.insert(addr.ip());
+    let _bouncer = Bouncer::new(ip, Arc::clone(&active_ips));
     info!("{}\t\tsaved", addr.ip());
 
     match time::timeout(WINDOW, router(req)).await {
@@ -89,5 +92,36 @@ async fn router(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infalli
                 .body(Full::new(Bytes::from(body)))
                 .unwrap())
         }
+    }
+}
+
+
+// spawn task on drop to drop IP
+struct Bouncer {
+    ip: IpAddr,
+    active_ips: Arc<Mutex<HashSet<IpAddr>>>,
+}
+
+impl Bouncer {
+    fn new(ip: IpAddr, active_ips: Arc<Mutex<HashSet<IpAddr>>>) -> Self {
+        Self { 
+            ip, 
+            active_ips 
+        }
+    }
+}
+
+impl Drop for Bouncer {
+    fn drop(&mut self) {
+        let active_ips = Arc::clone(&self.active_ips);
+        let ip = self.ip;
+        tokio::spawn(async move {
+            let mut set = active_ips.lock().await;
+            if set.remove(&ip) {
+                info!("{}\t\treleased", ip)
+            } else {
+                info!("{}\t\treleased already", ip);
+            }
+        });
     }
 }
